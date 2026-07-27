@@ -1,0 +1,193 @@
+DECLARE start_ts TIMESTAMP DEFAULT TIMESTAMP('2026-07-23');
+DECLARE end_ts   TIMESTAMP DEFAULT TIMESTAMP('2026-07-24');
+
+WITH impact_events AS (
+  SELECT
+    event_id,
+    event_ts,
+    robot_id,
+    host AS full_robot_id,
+    metadata,
+    JSON_VALUE(metadata, '$.impact_id') AS impact_id,
+    JSON_VALUE(metadata, '$.impact_severity') AS impact_severity
+  FROM `serve-robotics.serve_analytics.robot_events`
+  WHERE event_ts >= start_ts
+    AND event_ts < end_ts
+    AND JSON_VALUE(
+          metadata,
+          '$.impact_detection_state'
+        ) = 'IMPACT_DETECTION_STATE_IMPACT_DETECTED'
+
+  -- Protect against known duplicate robot_events rows.
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY event_id
+    ORDER BY event_ts
+  ) = 1
+),
+
+rover_state AS (
+  SELECT
+    robot_id,
+    time,
+    is_moving,
+    speed,
+    pilot_mode
+  FROM `serve-robotics.serve_analytics.stg_rover_state`
+  WHERE time >= TIMESTAMP_SUB(start_ts, INTERVAL 5 SECOND)
+    AND time < TIMESTAMP_ADD(end_ts, INTERVAL 5 SECOND)
+),
+
+impact_context AS (
+  SELECT
+    ie.event_id,
+    ie.event_ts,
+    ie.robot_id,
+    ie.full_robot_id,
+    ie.impact_id,
+    ie.impact_severity,
+
+    COUNT(rs.time) AS rover_state_rows,
+    COUNTIF(rs.is_moving IS NOT NULL) AS movement_state_rows,
+    COUNTIF(rs.is_moving = TRUE) AS moving_rows,
+
+    COUNTIF(
+      rs.pilot_mode = 'MOTION_SWITCH_LOCAL'
+    ) AS local_control_rows,
+
+    COUNTIF(
+      rs.pilot_mode = 'MOTION_SWITCH_REMOTE'
+    ) AS remote_control_rows,
+
+    MAX(ABS(rs.speed)) AS max_abs_speed,
+
+    ARRAY_AGG(
+      IF(
+        rs.speed IS NOT NULL,
+        STRUCT(
+          rs.speed AS speed,
+          rs.time AS speed_ts,
+          ABS(TIMESTAMP_DIFF(rs.time, ie.event_ts, MILLISECOND))
+            AS distance_ms
+        ),
+        NULL
+      )
+      IGNORE NULLS
+      ORDER BY
+        IF(
+          rs.speed IS NULL,
+          NULL,
+          ABS(TIMESTAMP_DIFF(rs.time, ie.event_ts, MILLISECOND))
+        )
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS nearest_speed_sample
+
+  FROM impact_events ie
+  LEFT JOIN rover_state rs
+    ON rs.robot_id = ie.robot_id
+   AND rs.time BETWEEN TIMESTAMP_SUB(ie.event_ts, INTERVAL 5 SECOND)
+                   AND TIMESTAMP_ADD(ie.event_ts, INTERVAL 5 SECOND)
+  GROUP BY
+    ie.event_id,
+    ie.event_ts,
+    ie.robot_id,
+    ie.full_robot_id,
+    ie.impact_id,
+    ie.impact_severity
+),
+
+filtered_impacts AS (
+  SELECT ic.*
+  FROM impact_context ic
+  WHERE
+    -- Require rover-state coverage near the impact.
+    ic.rover_state_rows > 0
+
+    -- Require an observed movement-state signal.
+    AND ic.movement_state_rows > 0
+
+    -- Stationary throughout the ±5-second window.
+    AND ic.moving_rows = 0
+
+    -- No active local-controller authority in that window.
+    AND ic.local_control_rows = 0
+
+    -- No remote-control authority in that window.
+    AND ic.remote_control_rows = 0
+
+    -- No remote pilot session open at the impact timestamp.
+    AND NOT EXISTS (
+      SELECT 1
+      FROM `serve-robotics.serve_analytics.pilot_robot_sessions` prs
+      WHERE CAST(prs.robot_id AS STRING) = CAST(ic.robot_id AS STRING)
+        AND ic.event_ts >= prs.session_start_timestamp
+        AND ic.event_ts < COALESCE(
+          prs.session_end_timestamp,
+          TIMESTAMP('9999-12-31')
+        )
+    )
+)
+
+SELECT
+  event_id,
+  impact_id,
+  event_ts,
+  robot_id,
+  full_robot_id,
+  impact_severity,
+
+  nearest_speed_sample.speed AS nearest_speed,
+  nearest_speed_sample.speed_ts,
+  max_abs_speed,
+
+  rover_state_rows,
+  movement_state_rows,
+
+  FORMAT(
+    'gs://rovers-data/cameras/%s/%s/',
+    full_robot_id,
+    FORMAT_TIMESTAMP(
+      '%Y/%m/%d/%H.%M',
+      TIMESTAMP_TRUNC(event_ts, MINUTE),
+      'UTC'
+    )
+  ) AS projected_camera_prefix,
+
+  [
+    FORMAT(
+      'gs://rovers-data/cameras/%s/%s/',
+      full_robot_id,
+      FORMAT_TIMESTAMP(
+        '%Y/%m/%d/%H.%M',
+        TIMESTAMP_TRUNC(
+          TIMESTAMP_SUB(event_ts, INTERVAL 1 MINUTE),
+          MINUTE
+        ),
+        'UTC'
+      )
+    ),
+    FORMAT(
+      'gs://rovers-data/cameras/%s/%s/',
+      full_robot_id,
+      FORMAT_TIMESTAMP(
+        '%Y/%m/%d/%H.%M',
+        TIMESTAMP_TRUNC(event_ts, MINUTE),
+        'UTC'
+      )
+    ),
+    FORMAT(
+      'gs://rovers-data/cameras/%s/%s/',
+      full_robot_id,
+      FORMAT_TIMESTAMP(
+        '%Y/%m/%d/%H.%M',
+        TIMESTAMP_TRUNC(
+          TIMESTAMP_ADD(event_ts, INTERVAL 1 MINUTE),
+          MINUTE
+        ),
+        'UTC'
+      )
+    )
+  ] AS candidate_camera_prefixes
+
+FROM filtered_impacts
+WHERE full_robot_id IS NOT NULL
+ORDER BY event_ts DESC;

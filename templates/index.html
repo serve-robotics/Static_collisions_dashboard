@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Static Collisions Dashboard</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 1200px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+  }
+  h1 { font-size: 1.4rem; }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .controls label { font-size: 0.9rem; }
+  button {
+    padding: 0.4rem 0.9rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  #status-line {
+    font-size: 0.9rem;
+    color: #666;
+    margin-bottom: 1rem;
+    min-height: 1.2em;
+  }
+  #status-line.error { color: #c0392b; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 1rem;
+  }
+  .card {
+    border: 1px solid rgba(128, 128, 128, 0.3);
+    border-radius: 8px;
+    padding: 0.5rem;
+  }
+  .card video { width: 100%; border-radius: 4px; display: block; }
+  .card .meta { font-size: 0.8rem; margin-top: 0.4rem; line-height: 1.4; }
+  .card .meta .robot { font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Static Collisions Dashboard</h1>
+
+<div class="controls">
+  <label>Day: <input type="date" id="day-input"></label>
+  <label>Batch size: <input type="number" id="batch-size" value="20" min="1" style="width: 4.5em"></label>
+  <label><input type="checkbox" id="force-rebuild"> Force rebuild</label>
+  <button id="run-btn">Run</button>
+  <button id="more-btn" disabled>Load more</button>
+</div>
+
+<div id="status-line"></div>
+<div class="grid" id="video-grid"></div>
+
+<script>
+const dayInput     = document.getElementById('day-input');
+const batchInput   = document.getElementById('batch-size');
+const forceInput   = document.getElementById('force-rebuild');
+const runBtn       = document.getElementById('run-btn');
+const moreBtn      = document.getElementById('more-btn');
+const statusLine   = document.getElementById('status-line');
+const grid         = document.getElementById('video-grid');
+
+const today = new Date().toISOString().slice(0, 10);
+dayInput.value = today;
+
+const seenFilenames = new Set();
+let pollTimer = null;
+
+function setBusy(busy) {
+  runBtn.disabled = busy;
+  moreBtn.disabled = busy || moreBtn.dataset.exhausted === '1';
+}
+
+function renderVideo(v) {
+  if (seenFilenames.has(v.filename)) return;
+  seenFilenames.add(v.filename);
+
+  const card = document.createElement('div');
+  card.className = 'card';
+
+  const video = document.createElement('video');
+  video.controls = true;
+  video.preload = 'metadata';
+  video.src = '/videos/' + encodeURIComponent(v.filename);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.innerHTML = `
+    <div class="robot">Robot ${v.robot_id ?? '?'}</div>
+    <div>${v.event_ts ?? ''}</div>
+    <div>${v.impact_severity ?? ''}</div>
+    <div>speed: ${v.nearest_speed ?? '?'} (max ${v.max_abs_speed ?? '?'})</div>
+  `;
+
+  card.appendChild(video);
+  card.appendChild(meta);
+  grid.appendChild(card);
+}
+
+function describeStatus(s) {
+  if (s.status === 'querying') return 'Querying BigQuery for events…';
+  if (s.status === 'error') return 'Error: ' + s.error;
+
+  const built = `built ${s.succeeded}`;
+  const target = s.query_count ? ` of ${s.query_count} events` : '';
+  const detail = `(attempted ${s.attempted}, ${s.failed} skipped/failed)`;
+
+  if (s.query_count === 0) return `No static-collision events found for ${s.day}.`;
+  if (s.status === 'running') return `${built}${target} ${detail}…`;
+  if (s.exhausted) return `${built}${target} ${detail} — all events processed.`;
+  return `${built}${target} ${detail} — batch complete.`;
+}
+
+async function poll() {
+  const res = await fetch('/status');
+  const s = await res.json();
+
+  statusLine.textContent = describeStatus(s);
+  statusLine.classList.toggle('error', s.status === 'error');
+
+  s.videos.forEach(renderVideo);
+
+  moreBtn.dataset.exhausted = s.exhausted ? '1' : '0';
+  const active = s.status === 'querying' || s.status === 'running';
+  setBusy(active);
+
+  if (active) {
+    pollTimer = setTimeout(poll, 1500);
+  } else {
+    clearTimeout(pollTimer);
+  }
+}
+
+runBtn.addEventListener('click', async () => {
+  const day = dayInput.value;
+  if (!day) return;
+
+  seenFilenames.clear();
+  grid.innerHTML = '';
+  statusLine.textContent = 'Starting…';
+  statusLine.classList.remove('error');
+
+  const res = await fetch('/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      day,
+      batch_size: parseInt(batchInput.value, 10) || 20,
+      force_rebuild: forceInput.checked,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    statusLine.textContent = 'Error: ' + (err.error || res.statusText);
+    statusLine.classList.add('error');
+    return;
+  }
+
+  clearTimeout(pollTimer);
+  poll();
+});
+
+moreBtn.addEventListener('click', async () => {
+  const res = await fetch('/more', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ batch_size: parseInt(batchInput.value, 10) || 20 }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    statusLine.textContent = 'Error: ' + (err.error || res.statusText);
+    statusLine.classList.add('error');
+    return;
+  }
+
+  clearTimeout(pollTimer);
+  poll();
+});
+</script>
+</body>
+</html>

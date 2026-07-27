@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Generated pipeline output (large/regenerable)
+work/
+grid_videos/
+*.log
+
+# Query exports / data snapshots
+*.json
+
+# OS / editor
+.DS_Store
