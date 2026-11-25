@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: serve-robotics/actions/security/email-validation@2c3955380ab017a1e1b2a684f415a0ce34427476  # v8.0
+      - uses: serve-robotics/actions/security/email-validation@169e8ddc9bfbbdb01cf53126b4b0a4e815280da8  # v8.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: serve-robotics/actions/security/semgrep@2c3955380ab017a1e1b2a684f415a0ce34427476  # v8.0
+      - uses: serve-robotics/actions/security/semgrep@169e8ddc9bfbbdb01cf53126b4b0a4e815280da8  # v8.1.0
 
   trivy:
     name: "Security Checks: Trivy Scan"
@@ -60,14 +60,14 @@ jobs:
               - "/**/*-patch.yaml"
               - "/**/*.patch.yaml"
           EOF
-      - uses: serve-robotics/actions/security/trivy@2c3955380ab017a1e1b2a684f415a0ce34427476  # v8.0
+      - uses: serve-robotics/actions/security/trivy@169e8ddc9bfbbdb01cf53126b4b0a4e815280da8  # v8.1.0
 
   checkov:
     name: "Security Checks: Checkov Scan"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: serve-robotics/actions/security/checkov@2c3955380ab017a1e1b2a684f415a0ce34427476  # v8.0
+      - uses: serve-robotics/actions/security/checkov@169e8ddc9bfbbdb01cf53126b4b0a4e815280da8  # v8.1.0
 
   detect-languages:
     name: Detect changed languages (for CodeQL)
