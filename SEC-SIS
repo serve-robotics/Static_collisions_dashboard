@@ -1,0 +1,8 @@
+# Service Identification Strings (Service Identification Specification v1.0).
+# Same matching rules as CODEOWNERS: the last matching pattern wins. Every path
+# here should also have its own entry in SEC-SCS.
+
+# GitHub
+/.github/                                                                       SIS:1.0:github::
+/.github/workflows/                                                             SIS:1.0:github:workflows:
+/.github/workflows/security*                                                    SIS:1.0:github:workflows:security
